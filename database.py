@@ -1,196 +1,324 @@
 """
-SQLite база данных для Тихого Финансового Контролёра.
-Путь к БД берётся из переменной окружения DB_PATH (по умолчанию /data/finance.db).
+Хранилище данных — Google Sheets.
+Две вкладки:
+  • transactions  — все транзакции
+  • settings      — настройки (дата начала учёта)
+
+Переменные окружения:
+  GOOGLE_SHEET_ID      — ID таблицы из URL
+  GOOGLE_CREDENTIALS   — содержимое JSON-ключа сервисного аккаунта (одной строкой)
 """
 
-import sqlite3
 import os
-from datetime import datetime, date
+import json
+import logging
+from datetime import datetime
+from typing import Optional
 
-DB_PATH = os.environ.get("DB_PATH", "/data/finance.db")
+import gspread
+from google.oauth2.service_account import Credentials
+
+logger = logging.getLogger(__name__)
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
+
+# Заголовки листа transactions
+TX_HEADERS = ["id", "created_at", "user_id", "username", "amount", "currency", "comment", "raw_text", "msg_id"]
+
+# ─────────────────────────────────────────────
+# ПОДКЛЮЧЕНИЕ
+# ─────────────────────────────────────────────
+def _get_client() -> gspread.Client:
+    creds_raw = os.environ["GOOGLE_CREDENTIALS"]
+    creds_dict = json.loads(creds_raw)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    return gspread.authorize(creds)
 
 
-def _get_conn():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _get_sheets():
+    client = _get_client()
+    spreadsheet = client.open_by_key(SHEET_ID)
+    return spreadsheet
 
 
+def _get_tx_sheet():
+    return _get_sheets().worksheet("transactions")
+
+
+def _get_settings_sheet():
+    return _get_sheets().worksheet("settings")
+
+
+# ─────────────────────────────────────────────
+# ИНИЦИАЛИЗАЦИЯ
+# ─────────────────────────────────────────────
 def init_db():
-    with _get_conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT    NOT NULL,
-                user_id    INTEGER NOT NULL,
-                username   TEXT    NOT NULL,
-                amount     INTEGER NOT NULL,
-                currency   TEXT    NOT NULL,
-                comment    TEXT,
-                raw_text   TEXT
-            )
-        """)
-        # Таблица настроек (например, дата начала учёта)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        """)
-        conn.commit()
+    """Создаёт нужные вкладки и заголовки если их нет."""
+    try:
+        spreadsheet = _get_sheets()
+        existing = [ws.title for ws in spreadsheet.worksheets()]
+
+        # Вкладка transactions
+        if "transactions" not in existing:
+            ws = spreadsheet.add_worksheet(title="transactions", rows=10000, cols=len(TX_HEADERS))
+            ws.append_row(TX_HEADERS)
+            # Форматирование заголовка
+            ws.format("A1:I1", {
+                "backgroundColor": {"red": 0.12, "green": 0.30, "blue": 0.48},
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+            })
+            ws.freeze(rows=1)
+            logger.info("Created 'transactions' sheet")
+        else:
+            ws = spreadsheet.worksheet("transactions")
+            # Проверяем заголовки
+            if ws.row_count == 0 or ws.row_values(1) != TX_HEADERS:
+                ws.insert_row(TX_HEADERS, 1)
+                ws.format("A1:I1", {
+                    "backgroundColor": {"red": 0.12, "green": 0.30, "blue": 0.48},
+                    "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                })
+                ws.freeze(rows=1)
+
+        # Вкладка settings
+        if "settings" not in existing:
+            ws2 = spreadsheet.add_worksheet(title="settings", rows=50, cols=2)
+            ws2.append_row(["key", "value"])
+            logger.info("Created 'settings' sheet")
+
+        logger.info("Google Sheets DB initialized OK")
+    except Exception as e:
+        logger.error(f"init_db error: {e}")
+        raise
 
 
 # ─────────────────────────────────────────────
 # НАСТРОЙКИ
 # ─────────────────────────────────────────────
-
 def get_setting(key: str, default=None):
-    with _get_conn() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    return row["value"] if row else default
+    try:
+        ws = _get_settings_sheet()
+        records = ws.get_all_records()
+        for row in records:
+            if str(row.get("key")) == key:
+                return str(row.get("value")) or default
+        return default
+    except Exception as e:
+        logger.error(f"get_setting error: {e}")
+        return default
 
 
 def set_setting(key: str, value: str):
-    with _get_conn() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, value)
-        )
-        conn.commit()
+    try:
+        ws = _get_settings_sheet()
+        records = ws.get_all_records()
+        for i, row in enumerate(records, start=2):
+            if str(row.get("key")) == key:
+                ws.update_cell(i, 2, value)
+                return
+        ws.append_row([key, value])
+    except Exception as e:
+        logger.error(f"set_setting error: {e}")
 
 
-def get_start_date() -> str | None:
-    """Возвращает дату начала учёта в формате 'YYYY-MM-DD' или None."""
-    return get_setting("start_date")
+def get_start_date() -> Optional[str]:
+    val = get_setting("start_date")
+    return val if val else None
 
 
 def set_start_date(dt: str):
-    """dt — строка 'YYYY-MM-DD'."""
     set_setting("start_date", dt)
+
+
+# ─────────────────────────────────────────────
+# ВСПОМОГАТЕЛЬНЫЕ
+# ─────────────────────────────────────────────
+def _next_id(ws) -> int:
+    """Возвращает следующий auto-increment ID."""
+    all_vals = ws.col_values(1)  # колонка id
+    nums = [int(v) for v in all_vals[1:] if v.isdigit()]
+    return max(nums) + 1 if nums else 1
+
+
+def _rows_to_dicts(rows: list, headers: list) -> list:
+    result = []
+    for row in rows:
+        # Дополняем короткие строки
+        row = list(row) + [""] * (len(headers) - len(row))
+        d = dict(zip(headers, row))
+        # Конвертируем amount в int
+        try:
+            d["amount"] = int(d["amount"])
+        except (ValueError, TypeError):
+            d["amount"] = 0
+        result.append(d)
+    return result
 
 
 # ─────────────────────────────────────────────
 # ТРАНЗАКЦИИ
 # ─────────────────────────────────────────────
-
-def add_transaction(user_id, username, amount, currency, comment, raw_text) -> int:
-    """Возвращает ID новой записи."""
+def add_transaction(user_id, username, amount, currency, comment, raw_text, msg_id=None) -> int:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Проверяем дату начала учёта
     start = get_start_date()
     if start and now[:10] < start:
-        return -1  # Запись до даты начала — игнорируем
-
-    with _get_conn() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO transactions (created_at, user_id, username, amount, currency, comment, raw_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (now, user_id, username, amount, currency, comment, raw_text),
-        )
-        conn.commit()
-        return cur.lastrowid
-
-
-def delete_transaction(tx_id: int) -> bool:
-    with _get_conn() as conn:
-        cur = conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
-        conn.commit()
-        return cur.rowcount > 0
+        return -1
+    try:
+        ws    = _get_tx_sheet()
+        tx_id = _next_id(ws)
+        ws.append_row([
+            tx_id, now, user_id, username,
+            amount, currency,
+            comment or "", raw_text or "",
+            msg_id or "",
+        ])
+        return tx_id
+    except Exception as e:
+        logger.error(f"add_transaction error: {e}")
+        return -1
 
 
-def edit_transaction_comment(tx_id: int, new_comment: str) -> bool:
-    with _get_conn() as conn:
-        cur = conn.execute(
-            "UPDATE transactions SET comment = ? WHERE id = ?",
-            (new_comment, tx_id)
-        )
-        conn.commit()
-        return cur.rowcount > 0
+def _find_row_by_id(ws, tx_id: int) -> Optional[int]:
+    """Возвращает номер строки (1-based) для данного tx_id."""
+    ids = ws.col_values(1)
+    for i, val in enumerate(ids, start=1):
+        if str(val) == str(tx_id):
+            return i
+    return None
 
 
-def get_transaction_by_id(tx_id: int):
-    with _get_conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM transactions WHERE id = ?", (tx_id,)
-        ).fetchone()
-    return dict(row) if row else None
+def update_transaction(tx_id, amount, currency, comment, raw_text):
+    try:
+        ws  = _get_tx_sheet()
+        row = _find_row_by_id(ws, tx_id)
+        if not row:
+            return
+        ws.update_cell(row, 5, amount)    # amount
+        ws.update_cell(row, 6, currency)  # currency
+        ws.update_cell(row, 7, comment or "")
+        ws.update_cell(row, 8, raw_text or "")
+    except Exception as e:
+        logger.error(f"update_transaction error: {e}")
 
 
-def get_balance(from_date: str = None, to_date: str = None) -> dict:
-    """
-    Возвращает {'UZS': int, 'USD': int}.
-    Учитывает глобальную start_date, если from_date не задан явно.
-    """
-    start = from_date or get_start_date()
-
-    query = "SELECT currency, SUM(amount) as total FROM transactions"
-    params = []
-    conditions = []
-
-    if start:
-        conditions.append("created_at >= ?")
-        params.append(start + " 00:00:00")
-    if to_date:
-        conditions.append("created_at <= ?")
-        params.append(to_date + " 23:59:59")
-
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " GROUP BY currency"
-
-    with _get_conn() as conn:
-        rows = conn.execute(query, params).fetchall()
-
-    return {row["currency"]: row["total"] or 0 for row in rows}
+def delete_transaction(tx_id) -> bool:
+    try:
+        ws  = _get_tx_sheet()
+        row = _find_row_by_id(ws, tx_id)
+        if not row:
+            return False
+        ws.delete_rows(row)
+        return True
+    except Exception as e:
+        logger.error(f"delete_transaction error: {e}")
+        return False
 
 
-def get_recent_transactions(limit: int = 5, from_date: str = None) -> list:
-    start = from_date or get_start_date()
-    query = "SELECT * FROM transactions"
-    params = []
-    if start:
-        query += " WHERE created_at >= ?"
-        params.append(start + " 00:00:00")
-    query += " ORDER BY id DESC LIMIT ?"
-    params.append(limit)
-
-    with _get_conn() as conn:
-        rows = conn.execute(query, params).fetchall()
-    return [dict(r) for r in rows]
+def edit_transaction_comment(tx_id, new_comment):
+    try:
+        ws  = _get_tx_sheet()
+        row = _find_row_by_id(ws, tx_id)
+        if row:
+            ws.update_cell(row, 7, new_comment)
+    except Exception as e:
+        logger.error(f"edit_transaction_comment error: {e}")
 
 
-def get_report(from_date: str, to_date: str) -> dict:
-    """
-    Возвращает детальный отчёт за период.
-    {
-        'income_uzs': int, 'expense_uzs': int, 'balance_uzs': int,
-        'income_usd': int, 'expense_usd': int, 'balance_usd': int,
-        'count': int,
-        'transactions': [...]
-    }
-    """
-    with _get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM transactions
-            WHERE created_at >= ? AND created_at <= ?
-            ORDER BY created_at ASC
-            """,
-            (from_date + " 00:00:00", to_date + " 23:59:59"),
-        ).fetchall()
+def get_transaction_by_id(tx_id) -> Optional[dict]:
+    try:
+        ws  = _get_tx_sheet()
+        row = _find_row_by_id(ws, tx_id)
+        if not row:
+            return None
+        vals = ws.row_values(row)
+        return _rows_to_dicts([vals], TX_HEADERS)[0]
+    except Exception as e:
+        logger.error(f"get_transaction_by_id error: {e}")
+        return None
 
-    txs = [dict(r) for r in rows]
+
+def get_transaction_by_msg_id(msg_id) -> Optional[dict]:
+    try:
+        ws   = _get_tx_sheet()
+        data = ws.get_all_values()
+        # Последний совпадающий msg_id
+        for row in reversed(data[1:]):
+            row = list(row) + [""] * (len(TX_HEADERS) - len(row))
+            if str(row[8]) == str(msg_id):
+                return _rows_to_dicts([row], TX_HEADERS)[0]
+        return None
+    except Exception as e:
+        logger.error(f"get_transaction_by_msg_id error: {e}")
+        return None
+
+
+def _get_all_tx_filtered(from_date=None, to_date=None) -> list:
+    """Возвращает все транзакции с фильтрацией по датам."""
+    try:
+        ws   = _get_tx_sheet()
+        data = ws.get_all_values()
+        rows = data[1:]  # пропускаем заголовок
+
+        start = from_date or get_start_date()
+        result = []
+        for row in rows:
+            row = list(row) + [""] * (len(TX_HEADERS) - len(row))
+            created_at = row[1][:10] if row[1] else ""
+            if start and created_at < start:
+                continue
+            if to_date and created_at > to_date:
+                continue
+            result.append(row)
+        return _rows_to_dicts(result, TX_HEADERS)
+    except Exception as e:
+        logger.error(f"_get_all_tx_filtered error: {e}")
+        return []
+
+
+def get_balance(from_date=None, to_date=None) -> dict:
+    txs = _get_all_tx_filtered(from_date, to_date)
+    result = {"UZS": 0, "USD": 0}
+    for t in txs:
+        cur = t.get("currency", "")
+        if cur in result:
+            result[cur] += t["amount"]
+    return result
+
+
+def get_recent_transactions(limit=5, from_date=None) -> list:
+    txs = _get_all_tx_filtered(from_date=from_date)
+    return list(reversed(txs[-limit:])) if txs else []
+
+
+def get_all_transactions(from_date=None, to_date=None) -> list:
+    return _get_all_tx_filtered(from_date, to_date)
+
+
+def get_first_transaction_date() -> Optional[str]:
+    try:
+        ws   = _get_tx_sheet()
+        data = ws.get_all_values()
+        if len(data) < 2:
+            return None
+        return data[1][1][:10] if data[1][1] else None
+    except Exception as e:
+        logger.error(f"get_first_transaction_date error: {e}")
+        return None
+
+
+def get_report(from_date, to_date) -> dict:
+    txs = _get_all_tx_filtered(from_date, to_date)
 
     def calc(currency, positive):
-        vals = [r["amount"] for r in txs if r["currency"] == currency]
+        vals = [t["amount"] for t in txs if t["currency"] == currency]
         if positive:
             return sum(v for v in vals if v > 0)
-        else:
-            return abs(sum(v for v in vals if v < 0))
+        return abs(sum(v for v in vals if v < 0))
 
     return {
         "income_uzs":  calc("UZS", True),
@@ -199,6 +327,6 @@ def get_report(from_date: str, to_date: str) -> dict:
         "income_usd":  calc("USD", True),
         "expense_usd": calc("USD", False),
         "balance_usd": calc("USD", True) - calc("USD", False),
-        "count": len(txs),
+        "count":       len(txs),
         "transactions": txs,
     }
