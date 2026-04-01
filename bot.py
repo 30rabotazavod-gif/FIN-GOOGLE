@@ -1174,9 +1174,6 @@ def main():
     # Редактирование сообщений в группе
     app.add_handler(MessageHandler(groups & filters.UpdateType.EDITED_MESSAGE, handle_group_edit))
 
-    # Удаление сообщений в группе
-    app.add_handler(MessageHandler(groups & filters.StatusUpdate.MESSAGE_DELETED, handle_group_delete))
-
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     logger.info("Bot v5 started.")
