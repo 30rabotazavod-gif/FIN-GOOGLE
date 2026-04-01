@@ -1101,6 +1101,59 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────
+# ГРУППА: удаление сообщений
+# ─────────────────────────────────────────────
+async def handle_group_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кто-то удалил сообщение в группе — спрашиваем админа."""
+    if not update.message:
+        return
+
+    msg = update.message
+    if msg.chat.id != ALLOWED_GROUP:
+        return
+
+    # Telegram присылает service message типа message_deleted
+    # Нам нужен forward_origin или reply_to_message для определения msg_id
+    # Самый надёжный способ — слушать обновления типа message с deleted_message
+    deleted = getattr(msg, "deleted_message", None) or getattr(update, "deleted_messages", None)
+    if not deleted:
+        return
+
+    # Обрабатываем как список или одиночный объект
+    items = deleted if isinstance(deleted, list) else [deleted]
+
+    for item in items:
+        msg_id = getattr(item, "message_id", None) or getattr(item, "id", None)
+        if not msg_id:
+            continue
+
+        from database import get_transaction_by_msg_id
+        tx = get_transaction_by_msg_id(msg_id)
+        if not tx:
+            continue  # Удалено сообщение без финансовой записи — игнорируем
+
+        sign = "+" if tx["amount"] > 0 else ""
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                f"🗑 <b>Сообщение удалено в группе</b>\n\n"
+                f"👤 {tx['username']}\n"
+                f"💰 {sign}{fmt(tx['amount'], tx['currency'])}\n"
+                f"📝 {tx['comment'] or '—'}\n"
+                f"📅 {tx['created_at'][:10]}\n\n"
+                f"Удалить запись <b>#{tx['id']}</b> из базы данных?"
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(f"✅ Да, удалить #{tx['id']}", callback_data=f"del:{tx['id']}"),
+                    InlineKeyboardButton("❌ Оставить",                  callback_data="noop"),
+                ]
+            ]),
+        )
+
+
+# ─────────────────────────────────────────────
 # ЗАПУСК
 # ─────────────────────────────────────────────
 def main():
@@ -1121,9 +1174,12 @@ def main():
     # Редактирование сообщений в группе
     app.add_handler(MessageHandler(groups & filters.UpdateType.EDITED_MESSAGE, handle_group_edit))
 
+    # Удаление сообщений в группе
+    app.add_handler(MessageHandler(groups & filters.StatusUpdate.MESSAGE_DELETED, handle_group_delete))
+
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    logger.info("Bot v4 started.")
+    logger.info("Bot v5 started.")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 

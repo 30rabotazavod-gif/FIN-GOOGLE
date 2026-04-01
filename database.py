@@ -72,6 +72,8 @@ def init_db():
                 "backgroundColor": {"red": 0.12, "green": 0.30, "blue": 0.48},
                 "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
             })
+            # Колонка amount (E) — числовой формат без разделителей
+            ws.format("E:E", {"numberFormat": {"type": "NUMBER", "pattern": "0"}})
             ws.freeze(rows=1)
             logger.info("Created 'transactions' sheet")
         else:
@@ -84,6 +86,8 @@ def init_db():
                     "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
                 })
                 ws.freeze(rows=1)
+            # Всегда применяем числовой формат без разделителей к колонке amount
+            ws.format("E:E", {"numberFormat": {"type": "NUMBER", "pattern": "0"}})
 
         # Вкладка settings
         if "settings" not in existing:
@@ -150,10 +154,29 @@ def _rows_to_dicts(rows: list, headers: list) -> list:
     for row in rows:
         row = list(row) + [""] * (len(headers) - len(row))
         d = dict(zip(headers, row))
-        # Конвертируем amount — убираем пробелы, запятые, обрабатываем float
+        # Конвертируем amount — Google Sheets может вернуть:
+        # "3000000", "3.000.000", "3,000,000", "3 000 000", "-150000", "3000.5"
         try:
-            raw_amount = str(d["amount"]).strip().replace(" ", "").replace(",", "").replace("\xa0", "")
-            d["amount"] = int(float(raw_amount)) if raw_amount else 0
+            raw = str(d["amount"]).strip().replace("\xa0", "").replace(" ", "")
+            # Определяем формат: если точек больше одной — они разделители тысяч
+            # Если точка одна и после неё не более 2 цифр — это десятичная
+            dot_count   = raw.count(".")
+            comma_count = raw.count(",")
+            if dot_count > 1:
+                # 3.000.000 → убираем все точки
+                raw = raw.replace(".", "")
+            elif dot_count == 1 and comma_count == 0:
+                # Может быть 3000.50 (десятичная) или 3.000 (тысячи)
+                parts = raw.split(".")
+                if len(parts[1]) == 3:
+                    # После точки ровно 3 цифры → разделитель тысяч: 3.000 → 3000
+                    raw = raw.replace(".", "")
+                else:
+                    # Десятичная дробь: 3000.50 → берём целую часть
+                    raw = raw.split(".")[0]
+            # Убираем запятые (американский формат 3,000,000)
+            raw = raw.replace(",", "")
+            d["amount"] = int(raw) if raw.lstrip("-") else 0
         except (ValueError, TypeError):
             d["amount"] = 0
         result.append(d)
