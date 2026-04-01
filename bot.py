@@ -33,6 +33,7 @@ from database import (
     get_start_date,
     set_start_date,
     get_all_transactions,
+    clear_all_transactions,
 )
 
 logging.basicConfig(
@@ -151,14 +152,17 @@ def reports_inline_keyboard() -> InlineKeyboardMarkup:
 def admin_inline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("➕ Добавить запись",   callback_data="admin:add"),
+            InlineKeyboardButton("➕ Добавить запись",    callback_data="admin:add"),
         ],
         [
-            InlineKeyboardButton("🗑 Удалить запись",    callback_data="admin:delete"),
-            InlineKeyboardButton("✏️ Изм. коммент",      callback_data="admin:edit"),
+            InlineKeyboardButton("🗑 Удалить запись",     callback_data="admin:delete"),
+            InlineKeyboardButton("✏️ Изм. коммент",       callback_data="admin:edit"),
         ],
         [
-            InlineKeyboardButton("🕐 Последние 10",      callback_data="admin:recent"),
+            InlineKeyboardButton("🕐 Последние 10",       callback_data="admin:recent"),
+        ],
+        [
+            InlineKeyboardButton("⚠️ Очистить все записи", callback_data="admin:clear_confirm"),
         ],
     ])
 
@@ -1030,6 +1034,51 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(user_id): return
         await query.edit_message_text("🔧 <b>Панель администратора</b>", parse_mode="HTML",
             reply_markup=admin_inline_keyboard())
+        return
+
+    if data == "admin:clear_confirm":
+        if not is_admin(user_id): return
+        from database import get_first_transaction_date
+        first = get_first_transaction_date()
+        bal   = get_balance()
+        uzs   = bal.get("UZS", 0)
+        usd   = bal.get("USD", 0)
+        await query.edit_message_text(
+            f"⚠️ <b>Удалить ВСЕ записи?</b>\n\n"
+            f"Это действие нельзя отменить!\n\n"
+            f"Текущий баланс будет потерян:\n"
+            f"💵 {fmt(usd, 'USD')}\n"
+            f"💳 {fmt(uzs, 'UZS')}\n"
+            f"📅 Записи с: {first or '—'}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Да, удалить всё", callback_data="admin:clear_execute"),
+                    InlineKeyboardButton("❌ Отмена",           callback_data="admin:back"),
+                ]
+            ]),
+        )
+        return
+
+    if data == "admin:clear_execute":
+        if not is_admin(user_id): return
+        await query.edit_message_text("⏳ Удаляю все записи...")
+        count = clear_all_transactions()
+        if count >= 0:
+            await query.edit_message_text(
+                f"✅ <b>Удалено {count} записей.</b>\n\nБаза данных очищена.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("◀️ Назад", callback_data="admin:back")]
+                ]),
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Ошибка при очистке. Попробуйте ещё раз.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("◀️ Назад", callback_data="admin:back")]
+                ]),
+            )
         return
 
     if data == "admin:delete":

@@ -148,12 +148,12 @@ def _next_id(ws) -> int:
 def _rows_to_dicts(rows: list, headers: list) -> list:
     result = []
     for row in rows:
-        # Дополняем короткие строки
         row = list(row) + [""] * (len(headers) - len(row))
         d = dict(zip(headers, row))
-        # Конвертируем amount в int
+        # Конвертируем amount — убираем пробелы, запятые, обрабатываем float
         try:
-            d["amount"] = int(d["amount"])
+            raw_amount = str(d["amount"]).strip().replace(" ", "").replace(",", "").replace("\xa0", "")
+            d["amount"] = int(float(raw_amount)) if raw_amount else 0
         except (ValueError, TypeError):
             d["amount"] = 0
         result.append(d)
@@ -309,6 +309,21 @@ def get_first_transaction_date() -> Optional[str]:
     except Exception as e:
         logger.error(f"get_first_transaction_date error: {e}")
         return None
+
+
+def clear_all_transactions() -> int:
+    """Удаляет все транзакции. Возвращает количество удалённых строк."""
+    try:
+        ws    = _get_tx_sheet()
+        rows  = ws.get_all_values()
+        count = len(rows) - 1  # без заголовка
+        if count <= 0:
+            return 0
+        ws.delete_rows(2, count + 1)
+        return count
+    except Exception as e:
+        logger.error(f"clear_all_transactions error: {e}")
+        return -1
 
 
 def get_report(from_date, to_date) -> dict:
