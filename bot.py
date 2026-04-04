@@ -68,6 +68,9 @@ def fmt(amount: int, currency: str) -> str:
 
 def parse_transaction(text: str):
     text = text.strip()
+    if not text:
+        return None
+
     if text.startswith("+"):
         t_type = "income"
         text = text[1:].strip()
@@ -77,9 +80,16 @@ def parse_transaction(text: str):
     else:
         t_type = "expense"
 
-    match = re.search(r"\d[\d.]*", text)
+    # Убираем запятые как разделители тысяч ДО поиска числа
+    # -900,000 → -900000 | 1,500,000 → 1500000
+    text_clean = re.sub(r"(\d),(\d)", r"\1\2", text)
+    # Повторно убираем если несколько запятых: 1,500,000
+    text_clean = re.sub(r"(\d),(\d)", r"\1\2", text_clean)
+
+    match = re.search(r"\d[\d.]*", text_clean)
     if not match:
         return None
+
     raw_number = match.group().replace(".", "")
     try:
         amount = int(raw_number)
@@ -89,7 +99,9 @@ def parse_transaction(text: str):
         return None
 
     currency = "USD" if "$" in text else "UZS"
-    rest = text[match.end():].replace("$", "").strip()
+    # Комментарий берём из оригинального текста после числа
+    match_orig = re.search(r"\d[\d.,]*", text)
+    rest = text[match_orig.end():].replace("$", "").strip() if match_orig else ""
     return {"type": t_type, "amount": amount, "currency": currency, "comment": rest}
 
 
@@ -370,12 +382,16 @@ def build_report_text(from_date, to_date, label) -> str:
 # ─────────────────────────────────────────────
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
-        return
+        return  # фото, стикеры, документы — молча пропускаем
     msg       = update.message
     user      = msg.from_user
     full_text = msg.text.strip()
 
     if msg.chat.id != ALLOWED_GROUP:
+        return
+
+    # Если в тексте вообще нет цифр — молча пропускаем (обычный разговор)
+    if not re.search(r"\d", full_text):
         return
 
     user_display = f"@{user.username}" if user.username else user.full_name

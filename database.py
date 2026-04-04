@@ -102,22 +102,30 @@ def init_db():
 
 
 # ─────────────────────────────────────────────
-# НАСТРОЙКИ
+# НАСТРОЙКИ (с кэшем в памяти — снижает кол-во запросов к API)
 # ─────────────────────────────────────────────
+_settings_cache: dict = {}  # key → value, живёт пока бот запущен
+
+
 def get_setting(key: str, default=None):
+    # Сначала смотрим в кэш
+    if key in _settings_cache:
+        return _settings_cache[key] or default
     try:
         ws = _get_settings_sheet()
         records = ws.get_all_records()
+        # Загружаем всё в кэш сразу
         for row in records:
-            if str(row.get("key")) == key:
-                return str(row.get("value")) or default
-        return default
+            _settings_cache[str(row.get("key"))] = str(row.get("value"))
+        return _settings_cache.get(key) or default
     except Exception as e:
         logger.error(f"get_setting error: {e}")
         return default
 
 
 def set_setting(key: str, value: str):
+    # Обновляем кэш сразу
+    _settings_cache[key] = value
     try:
         ws = _get_settings_sheet()
         records = ws.get_all_records()
